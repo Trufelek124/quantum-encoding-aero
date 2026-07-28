@@ -11,7 +11,7 @@ import torch.optim as optim
 import pennylane as qml
 from torch.utils.data import DataLoader, Subset
 
-from circuit import create_qnode
+from circuit import create_qnode, total_params
 from autoencoder7 import Autoencoder
 from hybrid_autoencoder7 import HybridAutoencoder
 from dataset_loader import get_image_dataloaders
@@ -38,7 +38,7 @@ def main(num_layers_override=None, noise_level_override=None, data_dir="data2", 
         NUM_LAYERS = 5
 
     NUM_QUBITS = 6
-    NUM_PARAMETERS = (NUM_QUBITS * 4) * NUM_LAYERS
+    NUM_PARAMETERS = total_params(NUM_QUBITS, NUM_LAYERS)
 
     IMAGE_SIZE = int(2 ** (NUM_QUBITS / 2))
     BATCH_SIZE = 8

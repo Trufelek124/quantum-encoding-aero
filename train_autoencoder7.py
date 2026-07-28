@@ -12,7 +12,7 @@ import torch.optim as optim
 import pennylane as qml
 from torch.utils.data import DataLoader, Subset
 
-from circuit import create_qnode, get_device
+from circuit import create_qnode, get_device, total_params
 from autoencoder7 import Autoencoder
 from hybrid_autoencoder7 import HybridAutoencoder, ColorHybridAutoencoder
 from patch_autoencoder import PatchHybridAutoencoder
@@ -45,6 +45,14 @@ def parse_args():
     p.add_argument("--bottleneck", type=int, default=23,
                     help="Розмір 'вузького горла' між енкодером і декодером. "
                          "Більше = менше стиснення, менш розмита реконструкція.")
+    p.add_argument("--encoder-dims", type=str, default=None,
+                    help="Розміри прихованих шарів ЕНКОДЕРА через кому, напр. '128,64' = "
+                         "два шари. Задає і кількість, і розміри шарів. За замовчуванням "
+                         "один шар розміру --hidden-dim (стара архітектура).")
+    p.add_argument("--decoder-dims", type=str, default=None,
+                    help="Розміри прихованих шарів ДЕКОДЕРА через кому, напр. '64,128,256'. "
+                         "За замовчуванням два шари: --hidden-dim і 2*--hidden-dim "
+                         "(стара архітектура).")
     p.add_argument("--epochs", type=int, default=None,
                     help="За замовчуванням 100, або 2 якщо --quick")
     p.add_argument("--quick", action="store_true",
@@ -94,6 +102,11 @@ def parse_args():
                     help="Інтерпретувати вихід кванта як 2D Haar-вейвлет коефіцієнти (груба "
                          "апроксимація + деталі) і застосувати обернене вейвлет-перетворення "
                          "замість прямого трактування як пікселів. Можна поєднувати зі --smooth-conv.")
+    p.add_argument("--diff-method", type=str, default=None,
+                    help="Перевизначити метод диференціювання кола (adjoint / parameter-shift / "
+                         "backprop). За замовчуванням: adjoint (прямий режим), parameter-shift "
+                         "(патч-режим), backprop (режим із шумом). Нові версії PennyLane можуть "
+                         "не приймати adjoint із qml.probs -- тоді передайте parameter-shift.")
     p.add_argument("--train-noise-level", type=float, default=0.0,
                     help="Тренувати ОДРАЗУ на зашумленому колі (default.mixed, деполяризуючий шум "
                          "з цією ймовірністю на гейт) замість ідеального. Значно повільніше "
@@ -102,12 +115,21 @@ def parse_args():
     return p.parse_args()
 
 
+def parse_dims(spec):
+    """'128,64' -> [128, 64]; None/'' -> None (Autoencoder візьме дефолти від hidden_dim)."""
+    if not spec:
+        return None
+    return [int(d) for d in str(spec).split(",") if d.strip()]
+
+
 def build_model(args):
     color = getattr(args, "color", False)
+    encoder_dims = parse_dims(getattr(args, "encoder_dims", None))
+    decoder_dims = parse_dims(getattr(args, "decoder_dims", None))
     if args.patch_mode:
         num_qubits = args.num_qubits
         image_size = args.image_size or (args.patch_size * 4)
-        num_params = (num_qubits * 4) * args.num_layers
+        num_params = total_params(num_qubits, args.num_layers)
 
         train_noise = getattr(args, "train_noise_level", 0.0)
         if train_noise > 0:
@@ -118,13 +140,14 @@ def build_model(args):
             dev, backend_used = get_device(num_qubits + 1)
         # adjoint не підтримує структуру патч-кола на цій версії PennyLane
         # (QuantumFunctionError) -- parameter-shift повільніший, але сумісний з усім.
-        diff_method = "backprop" if train_noise > 0 else "parameter-shift"
+        diff_method = getattr(args, "diff_method", None) or ("backprop" if train_noise > 0 else "parameter-shift")
         qnode = create_qnode(num_qubits, args.num_layers, dev, noise_level=train_noise, diff_method=diff_method)
         quantum_layer = PennyLaneQuantumLayer(qnode)
 
         classical_ae = Autoencoder(image_size=args.patch_size, num_params=num_params,
                                     hidden_dim=args.hidden_dim, bottleneck_size=args.bottleneck, activation="ReLU",
-                                    channels=3 if color else 1)
+                                    channels=3 if color else 1,
+                                    encoder_hidden_dims=encoder_dims, decoder_hidden_dims=decoder_dims)
         model = PatchHybridAutoencoder(classical_ae, quantum_layer, num_qubits,
                                         args.patch_size, image_size)
         return model, image_size, num_qubits, backend_used
@@ -139,7 +162,7 @@ def build_model(args):
             image_size = max(image_size, 1)
         else:
             image_size = int(round(2 ** (num_qubits / 2)))
-        num_params = (num_qubits * 4) * args.num_layers
+        num_params = total_params(num_qubits, args.num_layers)
 
         train_noise = getattr(args, "train_noise_level", 0.0)
         if train_noise > 0:
@@ -148,13 +171,14 @@ def build_model(args):
             backend_used = f"default.mixed (noise={train_noise})"
         else:
             dev, backend_used = get_device(num_qubits + 1)
-        diff_method = "backprop" if train_noise > 0 else "adjoint"
+        diff_method = getattr(args, "diff_method", None) or ("backprop" if train_noise > 0 else "adjoint")
         qnode = create_qnode(num_qubits, args.num_layers, dev, noise_level=train_noise, diff_method=diff_method)
         quantum_layer = PennyLaneQuantumLayer(qnode)
 
         classical_ae = Autoencoder(image_size=image_size, num_params=num_params,
                                     hidden_dim=args.hidden_dim, bottleneck_size=args.bottleneck, activation="ReLU",
-                                    channels=3 if color else 1)
+                                    channels=3 if color else 1,
+                                    encoder_hidden_dims=encoder_dims, decoder_hidden_dims=decoder_dims)
         use_smoothing = getattr(args, "smooth_conv", False)
         use_wavelet = getattr(args, "use_wavelet", False)
         if color:
@@ -201,6 +225,11 @@ def main():
     log_print(f"Режим: {'PATCH' if args.patch_mode else 'DIRECT'}")
     log_print(f"num_qubits={num_qubits} | image_size={image_size} | backend={backend_used}")
     log_print(f"Розмір статевектора симуляції: 2**{num_qubits+1} = {state_vector_size}")
+    ae = model.classical_encoder
+    log_print(f"Ансатців (шарів кола): {args.num_layers} | Параметрів кола: "
+              f"{total_params(num_qubits, args.num_layers)} (= вихід енкодера: {ae.num_params})")
+    log_print(f"Енкодер: {ae.input_dim} -> {ae.encoder_hidden_dims} -> bottleneck={args.bottleneck} | "
+              f"Декодер: {args.bottleneck} -> {ae.decoder_hidden_dims} -> {ae.num_params}")
     if args.patch_mode:
         log_print(f"patch_size={args.patch_size} | patches_per_side={image_size // args.patch_size}")
 

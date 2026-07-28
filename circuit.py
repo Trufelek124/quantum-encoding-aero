@@ -1,5 +1,24 @@
 import pennylane as qml
 
+# Один шар ансатцу споживає 4 параметри на кубіт:
+# 3 (U3) + 1 (ControlledPhaseShift) на кожну пару сусідніх wires.
+PARAMS_PER_QUBIT_PER_LAYER = 4
+
+
+def params_per_layer(num_qubits):
+    """К-сть параметрів, які споживає ОДИН шар ансатцу."""
+    return num_qubits * PARAMS_PER_QUBIT_PER_LAYER
+
+
+def total_params(num_qubits, num_layers):
+    """Скільки всього параметрів має видати класичний енкодер для цього кола.
+
+    Єдине джерело правди: використовуйте цю функцію замість ручної формули
+    (num_qubits * 4) * num_layers у скриптах тренування -- якщо ансатц колись
+    зміниться, достатньо буде оновити лише цей файл.
+    """
+    return num_layers * params_per_layer(num_qubits)
+
 
 def add_layer_pennylane(params, num_wires, noise_level=0.0):
     idx = 0
@@ -21,15 +40,23 @@ def add_layer_pennylane(params, num_wires, noise_level=0.0):
 
 def create_qnode(num_qubits, num_layers, dev, noise_level=0.0, diff_method="adjoint"):
     total_wires = num_qubits + 1
-    params_per_layer = num_qubits * 4
+    layer_params = params_per_layer(num_qubits)
+    expected_params = total_params(num_qubits, num_layers)
 
     @qml.qnode(dev, interface="torch", diff_method=diff_method)
     def circuit(weights):
+        if len(weights) != expected_params:
+            raise ValueError(
+                f"Коло очікує {expected_params} параметрів "
+                f"({num_layers} шарів x {layer_params} на шар для {num_qubits} кубітів), "
+                f"а отримало {len(weights)}. Класичний енкодер має видавати "
+                f"num_params = total_params(num_qubits, num_layers) з circuit.py."
+            )
         for wire in range(total_wires):
             qml.Hadamard(wires=wire)
         for layer_idx in range(num_layers):
-            start = layer_idx * params_per_layer
-            end = start + params_per_layer
+            start = layer_idx * layer_params
+            end = start + layer_params
             add_layer_pennylane(weights[start:end], total_wires, noise_level)
         for wire in range(total_wires):
             qml.Hadamard(wires=wire)
